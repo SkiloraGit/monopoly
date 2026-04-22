@@ -1,9 +1,10 @@
 /**
  * GameState - Estado completo y autoritativo de una partida
- * Incluye timeout de turno automático server-side
+ * UN solo dado (1-6). +200 SOLO al pasar/caer en inicio.
  */
 
 const BOARD_DATA = require('./BoardData');
+const CELL_COUNT = 44;
 
 const COLORS = ['#E74C3C','#3498DB','#2ECC71','#F39C12','#9B59B6','#1ABC9C','#E67E22','#E91E63'];
 
@@ -31,9 +32,9 @@ class GameState {
       actionData:    null,
     };
     this.pendingTrade = null;
-    this._turnTimer   = null;   // timeout server-side
-    this._onTimeout   = null;   // callback externo para broadcast
-    this._onBotTurn   = null;   // callback para ejecutar turno de bot
+    this._turnTimer   = null;
+    this._onTimeout   = null;
+    this._onBotTurn   = null;
     this.events       = [];
   }
 
@@ -64,6 +65,26 @@ class GameState {
     return this.players.filter(p => p.active);
   }
 
+  addBot(name) {
+    const bot = {
+      id:           'bot_' + Date.now() + '_' + Math.floor(Math.random() * 9999),
+      name:         name || ('Bot_' + (this.players.length)),
+      socketId:     null,
+      isBot:        true,
+      ready:        true,
+      color:        COLORS[this.players.length % COLORS.length],
+      gold:         0,
+      position:     0,
+      jailTurns:    0,
+      items:        [],
+      active:       true,
+      bonusRentTurns: 0,
+      disconnected: false,
+    };
+    this.players.push(bot);
+    return bot;
+  }
+
   // ─── Inicio de partida ────────────────────────────────────────────────────
 
   startGame() {
@@ -88,43 +109,13 @@ class GameState {
     this._startTurnTimer();
   }
 
-  // ─── Timeout de turno (server-side) ──────────────────────────────────────
+  // ─── Timeout / Bot callbacks ──────────────────────────────────────────────
 
-  setTurnTimeoutCallback(cb) {
-    this._onTimeout = cb;
-  }
-
-  setBotTurnCallback(cb) {
-    this._onBotTurn = cb;
-  }
-
-  // Agrega un bot como jugador
-  addBot(name) {
-    const bot = {
-      id:           'bot_' + Date.now() + '_' + Math.floor(Math.random() * 9999),
-      name:         name || ('Bot_' + (this.players.length)),
-      socketId:     null,
-      isBot:        true,
-      ready:        true,
-      color:        null,
-      gold:         0,
-      position:     0,
-      jailTurns:    0,
-      items:        [],
-      active:       true,
-      bonusRentTurns: 0,
-      disconnected: false,
-    };
-    // Asignar color como addPlayer pero sin sobrescribir ready/isBot
-    const COLORS = ['#E74C3C','#3498DB','#2ECC71','#F39C12','#9B59B6','#1ABC9C','#E67E22','#E91E63'];
-    bot.color = COLORS[this.players.length % COLORS.length];
-    this.players.push(bot);
-    return bot;
-  }
+  setTurnTimeoutCallback(cb) { this._onTimeout = cb; }
+  setBotTurnCallback(cb)     { this._onBotTurn = cb; }
 
   _startTurnTimer() {
     this._clearTurnTimer();
-    // Si el turno actual es de un bot, disparar acción automática tras 1.2s
     const currentPlayer = this.getPlayer(this.currentPlayerId);
     if (currentPlayer && currentPlayer.isBot && this.phase === 'playing') {
       this._turnTimer = setTimeout(() => {
@@ -134,7 +125,7 @@ class GameState {
       }, 1200);
       return;
     }
-    const secs = (this.config.turnTime || 30) + 5; // +5s de gracia
+    const secs = (this.config.turnTime || 30) + 5;
     this._turnTimer = setTimeout(() => {
       console.log(`[GameState] Timeout de turno para ${this.currentPlayerId}`);
       if (this.phase === 'playing' && this._onTimeout) {
@@ -144,54 +135,56 @@ class GameState {
   }
 
   _clearTurnTimer() {
-    if (this._turnTimer) {
-      clearTimeout(this._turnTimer);
-      this._turnTimer = null;
-    }
+    if (this._turnTimer) { clearTimeout(this._turnTimer); this._turnTimer = null; }
   }
 
-  // ─── Dados ────────────────────────────────────────────────────────────────
+  // ─── DADO: UN SOLO DADO (1-6) ─────────────────────────────────────────────
 
   rollDice() {
     const player = this.getPlayer(this.currentPlayerId);
     if (!player) return { error: 'Jugador no encontrado' };
     if (this.turnState.diceRolled) return { error: 'Ya tiraste el dado' };
 
-    const d1    = Math.floor(Math.random() * 6) + 1;
-    const d2    = Math.floor(Math.random() * 6) + 1;
-    const total = d1 + d2;
-    const isDouble = d1 === d2;
+    // UN SOLO DADO de 6 caras
+    const result = Math.floor(Math.random() * 6) + 1;
+    const isSix  = result === 6;  // 6 permite tirar de nuevo (equivale al "doble")
 
     this.turnState.diceRolled = true;
-    this.turnState.diceResult = { d1, d2, total };
+    this.turnState.diceResult = { result };  // solo 1 valor
 
     // En mazmorra
     if (player.jailTurns > 0) {
-      if (isDouble) {
+      if (isSix) {
         player.jailTurns = 0;
-        this._pushEvent('jail_escape_double', { playerId: player.id });
-        return this._movePlayer(player, total);
+        this._pushEvent('jail_escape_six', { playerId: player.id });
+        return this._movePlayer(player, result);
       } else {
         player.jailTurns--;
         this.turnState.actionPending = 'end_turn';
-        return { diceResult: { d1, d2, total }, events: this._flushEvents(), gameState: this._getPublicState() };
+        return { diceResult: { result }, events: this._flushEvents(), gameState: this._getPublicState() };
       }
     }
 
-    if (isDouble && !this.turnState.extraRoll) {
+    // 6 → tirar de nuevo (solo 1 vez extra)
+    if (isSix && !this.turnState.extraRoll) {
       this.turnState.extraRoll = true;
     }
 
-    return this._movePlayer(player, total);
+    return this._movePlayer(player, result);
   }
 
   _movePlayer(player, steps) {
     const oldPos = player.position;
-    let newPos   = (player.position + steps) % 44;
-    if (newPos < oldPos || (oldPos === 0 && steps > 0)) {
+    const newPos = (player.position + steps) % CELL_COUNT;
+
+    // +200 SOLO si el jugador cruza o cae exactamente en inicio (0)
+    // Cruce: newPos < oldPos (wrap-around), o caída exacta en 0
+    const crossedStart = (newPos < oldPos) || (oldPos !== 0 && newPos === 0);
+    if (crossedStart) {
       player.gold += 200;
       this._pushEvent('pass_start', { playerId: player.id, gold: 200 });
     }
+
     player.position = newPos;
     this._pushEvent('player_moved', { playerId: player.id, from: oldPos, to: newPos, steps });
     return this._resolveCellAction(player, newPos);
@@ -205,11 +198,12 @@ class GameState {
 
     switch (cell.type) {
       case 'inicio':
+        // Ya recibió +200 si cayó exactamente en inicio (wrap-around lo maneja _movePlayer)
         this.turnState.actionPending = 'end_turn';
         break;
       case 'aldea': case 'ciudad': case 'castillo':
       case 'recursos': case 'puerta': case 'puente':
-      case 'barraca':  case 'granja': case 'molino':
+      case 'barraca': case 'granja': case 'molino':
         this._resolveProperty(player, cellIndex, result);
         break;
       case 'mazmorra':
@@ -242,8 +236,8 @@ class GameState {
         this.turnState.actionPending = 'end_turn';
     }
 
-    result.events     = this._flushEvents();
-    result.gameState  = this._getPublicState();
+    result.events    = this._flushEvents();
+    result.gameState = this._getPublicState();
     return result;
   }
 
@@ -263,7 +257,6 @@ class GameState {
     } else {
       const owner = this.getPlayer(prop.ownerId);
       if (owner && owner.active) {
-        // Evitar pago con ítem
         if (player._avoidNextPayment) {
           player._avoidNextPayment = false;
           this._pushEvent('payment_avoided', { playerId: player.id });
@@ -295,7 +288,7 @@ class GameState {
 
     player.gold -= cellData.buyPrice;
     this.properties[cellIndex] = { ownerId: playerId, level: 0 };
-    this._pushEvent('property_bought', { playerId, cellIndex, price: cellData.buyPrice });
+    this._pushEvent('property_bought', { playerId, cellIndex, price: cellData.buyPrice, cellName: cellData.name });
     this.turnState.actionPending = 'end_turn';
     return { success: true, events: this._flushEvents(), gameState: this._getPublicState() };
   }
@@ -315,7 +308,7 @@ class GameState {
 
     player.gold -= cost;
     prop.level   = level + 1;
-    this._pushEvent('property_upgraded', { playerId, cellIndex, newLevel: prop.level, cost });
+    this._pushEvent('property_upgraded', { playerId, cellIndex, newLevel: prop.level, cost, cellName: cellData.name });
     return { success: true, events: this._flushEvents(), gameState: this._getPublicState() };
   }
 
@@ -334,12 +327,11 @@ class GameState {
   _calculateRent(cellIndex, level) {
     const cell = BOARD_DATA.cells[cellIndex];
     if (cell.rents && cell.rents[level] !== undefined) {
-      // Para sets (puertas, puentes, etc.) la renta escala por cantidad poseída
       if (['puerta','puente','barraca','recursos'].includes(cell.type) && cell.groupId) {
-        const group  = BOARD_DATA.getGroup(cell.groupId);
+        const group   = BOARD_DATA.getGroup(cell.groupId);
         const ownerId = this.properties[cellIndex]?.ownerId;
-        const owned  = group.filter(i => this.properties[i]?.ownerId === ownerId).length;
-        const idx    = Math.min(owned - 1, cell.rents.length - 1);
+        const owned   = group.filter(i => this.properties[i]?.ownerId === ownerId).length;
+        const idx     = Math.min(owned - 1, cell.rents.length - 1);
         return cell.rents[Math.max(0, idx)];
       }
       return cell.rents[level];
@@ -380,7 +372,7 @@ class GameState {
     if (item) {
       item.id = Date.now().toString();
       player.items.push(item);
-      this._pushEvent('item_obtained', { playerId: player.id, item });
+      this._pushEvent('item_obtained', { playerId: player.id, item, playerName: player.name });
     }
     this.turnState.actionPending = 'end_turn';
   }
@@ -398,7 +390,7 @@ class GameState {
         player._avoidNextPayment = true;
         break;
       case 'teleport': {
-        const newPos = Math.floor(Math.random() * 44);
+        const newPos = Math.floor(Math.random() * CELL_COUNT);
         player.position = newPos;
         this._pushEvent('item_used', { playerId, item, effect: 'teleported', to: newPos });
         return this._resolveCellAction(player, newPos);
@@ -409,9 +401,7 @@ class GameState {
           const [idx] = myProps[Math.floor(Math.random() * myProps.length)];
           const cd = BOARD_DATA.cells[parseInt(idx)];
           const prop = this.properties[idx];
-          if (cd.upgradeCosts && prop.level < cd.upgradeCosts.length) {
-            prop.level++;
-          }
+          if (cd.upgradeCosts && prop.level < cd.upgradeCosts.length) prop.level++;
         }
         break;
       }
@@ -421,7 +411,7 @@ class GameState {
         break;
     }
 
-    this._pushEvent('item_used', { playerId, item });
+    this._pushEvent('item_used', { playerId, item, playerName: player.name });
     return { success: true, events: this._flushEvents(), gameState: this._getPublicState() };
   }
 
@@ -435,19 +425,20 @@ class GameState {
       if (r < 0.33) {
         const loss = Math.floor(100 + Math.random() * 200);
         player.gold = Math.max(0, player.gold - loss);
-        this._pushEvent('card', { type: 'lose_gold', amount: loss, playerId: player.id });
+        this._pushEvent('card', { type: 'lose_gold', amount: loss, playerId: player.id, playerName: player.name });
       } else if (r < 0.66) {
         player.jailTurns = 3;
-        this._pushEvent('card', { type: 'jail', playerId: player.id });
+        this._pushEvent('card', { type: 'jail', playerId: player.id, playerName: player.name });
       } else {
         const myProps = Object.keys(this.properties).filter(i => this.properties[i].ownerId === player.id);
         if (myProps.length > 0) {
           const idx = myProps[Math.floor(Math.random() * myProps.length)];
+          const cellName = BOARD_DATA.cells[parseInt(idx)]?.name || '';
           delete this.properties[idx];
-          this._pushEvent('card', { type: 'lose_property', cellIndex: idx, playerId: player.id });
+          this._pushEvent('card', { type: 'lose_property', cellIndex: idx, cellName, playerId: player.id, playerName: player.name });
         } else {
           player.gold = Math.max(0, player.gold - 50);
-          this._pushEvent('card', { type: 'lose_gold', amount: 50, playerId: player.id });
+          this._pushEvent('card', { type: 'lose_gold', amount: 50, playerId: player.id, playerName: player.name });
         }
       }
     } else {
@@ -455,30 +446,32 @@ class GameState {
       if (r < 0.30) {
         const gain = Math.floor(100 + Math.random() * 250);
         player.gold += gain;
-        this._pushEvent('card', { type: 'gain_gold', amount: gain, playerId: player.id });
+        this._pushEvent('card', { type: 'gain_gold', amount: gain, playerId: player.id, playerName: player.name });
       } else if (r < 0.50) {
         const abandoned = Object.entries(this.properties)
           .filter(([,v]) => !this.getPlayer(v.ownerId)?.active)
           .map(([k]) => k);
         if (abandoned.length > 0) {
           const idx = abandoned[Math.floor(Math.random() * abandoned.length)];
+          const cellName = BOARD_DATA.cells[parseInt(idx)]?.name || '';
           this.properties[idx] = { ownerId: player.id, level: 0 };
-          this._pushEvent('card', { type: 'inherit_property', cellIndex: idx, playerId: player.id });
+          this._pushEvent('card', { type: 'inherit_property', cellIndex: idx, cellName, playerId: player.id, playerName: player.name });
         } else {
           player.gold += 100;
-          this._pushEvent('card', { type: 'gain_gold', amount: 100, playerId: player.id });
+          this._pushEvent('card', { type: 'gain_gold', amount: 100, playerId: player.id, playerName: player.name });
         }
       } else if (r < 0.70) {
         player.bonusRentTurns = 3;
-        this._pushEvent('card', { type: 'double_rent', turns: 3, playerId: player.id });
+        this._pushEvent('card', { type: 'double_rent', turns: 3, playerId: player.id, playerName: player.name });
       } else if (r < 0.85) {
-        const newPos = Math.floor(Math.random() * 44);
+        const newPos = Math.floor(Math.random() * CELL_COUNT);
         player.position = newPos;
-        this._pushEvent('card', { type: 'advance', to: newPos, playerId: player.id });
+        this._pushEvent('card', { type: 'advance', to: newPos, playerId: player.id, playerName: player.name });
       } else {
+        // Volver al inicio: solo +200 si no estaba en 0
+        if (player.position !== 0) player.gold += 200;
         player.position = 0;
-        player.gold    += 200;
-        this._pushEvent('card', { type: 'return_start', playerId: player.id });
+        this._pushEvent('card', { type: 'return_start', playerId: player.id, playerName: player.name });
       }
     }
 
@@ -499,13 +492,13 @@ class GameState {
       this._pushEvent('mini_event', { type: 'all_lose_10pct' });
     } else if (r < 0.60) {
       player.gold += Math.floor(player.gold * 0.1);
-      this._pushEvent('mini_event', { type: 'one_gain', playerId: player.id });
+      this._pushEvent('mini_event', { type: 'one_gain', playerId: player.id, playerName: player.name });
     } else if (r < 0.80) {
       player.gold = Math.max(0, player.gold - Math.floor(player.gold * 0.1));
-      this._pushEvent('mini_event', { type: 'one_lose', playerId: player.id });
+      this._pushEvent('mini_event', { type: 'one_lose', playerId: player.id, playerName: player.name });
     } else {
       player.jailTurns = 3;
-      this._pushEvent('mini_event', { type: 'jail', playerId: player.id });
+      this._pushEvent('mini_event', { type: 'jail', playerId: player.id, playerName: player.name });
     }
     active.forEach(p => this._checkBankruptcy(p));
     this.turnState.actionPending = 'end_turn';
@@ -519,7 +512,7 @@ class GameState {
         if (myProps.length > 0) {
           const idx = myProps[Math.floor(Math.random() * myProps.length)];
           delete this.properties[idx];
-          this._pushEvent('global_event_prop_lost', { playerId: p.id, cellIndex: idx });
+          this._pushEvent('global_event_prop_lost', { playerId: p.id, playerName: p.name, cellIndex: idx });
         }
       });
       this._pushEvent('global_event', { type: 'all_lose_property' });
@@ -529,7 +522,7 @@ class GameState {
       if (myProps.length > 0) {
         const idx = myProps[Math.floor(Math.random() * myProps.length)];
         delete this.properties[idx];
-        this._pushEvent('global_event', { type: 'one_lose_property', playerId: target.id, cellIndex: idx });
+        this._pushEvent('global_event', { type: 'one_lose_property', playerId: target.id, playerName: target.name, cellIndex: idx });
       }
     }
     this.turnState.actionPending = 'end_turn';
@@ -538,23 +531,13 @@ class GameState {
   // ─── Duelos ───────────────────────────────────────────────────────────────
 
   resolveDuel(challengerId, targetId) {
-    if (this.turnState.actionPending !== 'duel') {
-      return { error: 'No hay duelo pendiente' };
-    }
+    if (this.turnState.actionPending !== 'duel') return { error: 'No hay duelo pendiente' };
     const challenger = this.getPlayer(challengerId);
     const active     = this.getActivePlayers().filter(p => p.id !== challengerId);
-    if (active.length === 0) {
-      this.turnState.actionPending = 'end_turn';
-      return { error: 'Sin rivales disponibles' };
-    }
-    const target = targetId
-      ? this.getPlayer(targetId)
-      : active[Math.floor(Math.random() * active.length)];
+    if (active.length === 0) { this.turnState.actionPending = 'end_turn'; return { error: 'Sin rivales' }; }
 
-    if (!target || !target.active) {
-      this.turnState.actionPending = 'end_turn';
-      return { error: 'Rival no disponible' };
-    }
+    const target = targetId ? this.getPlayer(targetId) : active[Math.floor(Math.random() * active.length)];
+    if (!target || !target.active) { this.turnState.actionPending = 'end_turn'; return { error: 'Rival no disponible' }; }
 
     let cRoll, tRoll;
     do { cRoll = Math.floor(Math.random()*6)+1; tRoll = Math.floor(Math.random()*6)+1; }
@@ -566,7 +549,8 @@ class GameState {
     winner.gold += prize;
 
     this._pushEvent('duel_resolved', { challengerId, targetId: target.id,
-      challengerRoll: cRoll, targetRoll: tRoll, winnerId: winner.id, loserId: loser.id, prize });
+      challengerRoll: cRoll, targetRoll: tRoll, winnerId: winner.id, loserId: loser.id, prize,
+      winnerName: winner.name, loserName: loser.name });
     this._checkBankruptcy(loser);
     this.turnState.actionPending = 'end_turn';
 
@@ -592,10 +576,7 @@ class GameState {
   respondTrade(playerId, accepted) {
     if (!this.pendingTrade) return { error: 'Sin intercambio pendiente' };
     if (this.pendingTrade.toId !== playerId) return { error: 'No eres el destinatario' };
-    if (Date.now() > this.pendingTrade.expiresAt) {
-      this.pendingTrade = null;
-      return { error: 'Intercambio expirado' };
-    }
+    if (Date.now() > this.pendingTrade.expiresAt) { this.pendingTrade = null; return { error: 'Intercambio expirado' }; }
     if (!accepted) {
       this._pushEvent('trade_rejected', { ...this.pendingTrade });
       this.pendingTrade = null;
@@ -616,7 +597,6 @@ class GameState {
     const player = this.getPlayer(this.currentPlayerId);
     if (player && player.bonusRentTurns > 0) player.bonusRentTurns--;
 
-    // Doble → tira de nuevo
     if (this.turnState.extraRoll) {
       this.turnState.extraRoll  = false;
       this.turnState.diceRolled = false;
@@ -632,7 +612,6 @@ class GameState {
 
     this._advanceTurn();
     this._startTurnTimer();
-
     return { turnEnded: true, nextPlayerId: this.currentPlayerId,
              events: this._flushEvents(), gameState: this._getPublicState() };
   }
@@ -666,7 +645,7 @@ class GameState {
       Object.keys(this.properties).forEach(idx => {
         if (this.properties[idx].ownerId === player.id) delete this.properties[idx];
       });
-      this._pushEvent('bankruptcy', { playerId: player.id });
+      this._pushEvent('bankruptcy', { playerId: player.id, playerName: player.name });
     }
   }
 
@@ -682,31 +661,25 @@ class GameState {
     this.phase = 'finished';
     const ranking = [...this.players]
       .sort((a,b) => b.gold - a.gold)
-      .map((p,i) => ({ rank: i+1, playerId: p.id, name: p.name, gold: p.gold, active: p.active }));
+      .map((p,i) => ({ rank: i+1, playerId: p.id, name: p.name, gold: p.gold, active: p.active, isBot: p.isBot||false }));
     this._pushEvent('game_over', { ranking });
     return { gameOver: true, ranking, events: this._flushEvents(), gameState: this._getPublicState() };
   }
 
-  // ─── IA de bots ──────────────────────────────────────────────────────────────
+  // ─── IA de bots ───────────────────────────────────────────────────────────
 
-  // Ejecuta un turno completo del bot de forma autoritativa.
-  // Retorna un array de resultados de acciones para que el caller los emita.
   playBotTurn(botId) {
     const bot = this.getPlayer(botId);
     if (!bot || !bot.isBot || !bot.active) return [];
     if (this.currentPlayerId !== botId) return [];
 
     const results = [];
-
-    // 1. Tirar dado (usa la misma lógica que rollDice())
     const diceResult = this.rollDice();
     results.push({ type: 'dice_rolled', ...diceResult });
 
-    // 2. Evaluar la casilla y tomar decisión
     const cellAction = this._botDecideAction(bot, diceResult);
     if (cellAction) results.push(cellAction);
 
-    // 3. Si quedó en mazmorra y tiene ítem de escape, usarlo
     if (bot.jailTurns > 0) {
       const escapeIdx = bot.items.findIndex(i => i.type === 'escape_jail');
       if (escapeIdx >= 0) {
@@ -715,14 +688,11 @@ class GameState {
       }
     }
 
-    // 4. Terminar turno
-    // Si hubo extraRoll (doble), el bot tira de nuevo — se maneja en el callback
     if (!this.turnState.extraRoll) {
       const endResult = this.endTurn();
       results.push({ type: 'turn_ended', ...endResult });
     } else {
-      // Doble: el callback _onBotTurn será llamado de nuevo por _startTurnTimer
-      const endResult = this.endTurn(); // esto vacía el extraRoll y relanza el timer
+      const endResult = this.endTurn();
       results.push({ type: 'turn_ended', ...endResult });
     }
 
@@ -730,27 +700,21 @@ class GameState {
   }
 
   _botDecideAction(bot, diceResult) {
-    // Si hubo error en el dado, no hacer nada
     if (diceResult.error) return null;
-
     const pending = this.turnState.actionPending;
 
     if (pending === 'buy') {
-      // Comprar si tiene oro suficiente y la propiedad no es demasiado cara relativamente
       const cellIndex = this.turnState.actionData?.cellIndex;
       if (cellIndex !== undefined) {
-        const cell = require('./BoardData').cells[cellIndex];
+        const cell  = BOARD_DATA.cells[cellIndex];
         const price = cell?.buyPrice || 0;
-        // Bot compra si tiene al menos el doble del precio (estrategia conservadora)
         if (bot.gold >= price && bot.gold >= price * 1.5) {
           const buyResult = this.buyProperty(bot.id);
           if (!buyResult.error) return { type: 'property_bought', ...buyResult };
         }
-        // Si no compra, termina turno (pasar)
         this.turnState.actionPending = 'end_turn';
       }
     } else if (pending === 'duel') {
-      // Elegir rival aleatorio
       const rivals = this.getActivePlayers().filter(p => p.id !== bot.id);
       if (rivals.length > 0) {
         const target = rivals[Math.floor(Math.random() * rivals.length)];
@@ -759,7 +723,6 @@ class GameState {
       }
       this.turnState.actionPending = 'end_turn';
     } else if (pending === 'end_turn') {
-      // Intentar mejorar propiedades antes de terminar
       const upgraded = this._botTryUpgrade(bot);
       if (upgraded) return { type: 'property_upgraded', ...upgraded };
     }
@@ -768,17 +731,14 @@ class GameState {
   }
 
   _botTryUpgrade(bot) {
-    // Intentar mejorar la propiedad más barata que pueda
-    const myProps = Object.entries(this.properties)
-      .filter(([, v]) => v.ownerId === bot.id);
-
+    const myProps = Object.entries(this.properties).filter(([,v]) => v.ownerId === bot.id);
     for (const [idxStr, prop] of myProps) {
       const idx = parseInt(idxStr);
       if (this._canUpgrade(bot.id, idx)) {
-        const cell = require('./BoardData').cells[idx];
+        const cell = BOARD_DATA.cells[idx];
         if (!cell.upgradeCosts) continue;
         const level = prop.level || 0;
-        const cost = cell.upgradeCosts[level];
+        const cost  = cell.upgradeCosts[level];
         if (cost && bot.gold >= cost * 1.5) {
           const result = this.upgradeProperty(bot.id, idx);
           if (!result.error) return result;
@@ -797,18 +757,18 @@ class GameState {
       config:          this.config,
       host:            { id: this.host.id, name: this.host.name },
       players:         this.players.map(p => ({
-        id:              p.id,
-        name:            p.name,
-        color:           p.color,
-        gold:            p.gold,
-        position:        p.position,
-        jailTurns:       p.jailTurns,
-        items:           p.items,
-        active:          p.active,
-        ready:           p.ready,
-        bonusRentTurns:  p.bonusRentTurns,
-        disconnected:    p.disconnected,
-        isBot:           p.isBot || false,
+        id:             p.id,
+        name:           p.name,
+        color:          p.color,
+        gold:           p.gold,
+        position:       p.position,
+        jailTurns:      p.jailTurns,
+        items:          p.items,
+        active:         p.active,
+        ready:          p.ready,
+        bonusRentTurns: p.bonusRentTurns,
+        disconnected:   p.disconnected,
+        isBot:          p.isBot || false,
       })),
       properties:      this.properties,
       currentPlayerId: this.currentPlayerId,
@@ -819,8 +779,6 @@ class GameState {
   }
 
   getPublicState() { return this._getPublicState(); }
-
-  // ─── Eventos internos ─────────────────────────────────────────────────────
 
   _pushEvent(type, data) { this.events.push({ type, data, ts: Date.now() }); }
   _flushEvents()          { const e = [...this.events]; this.events = []; return e; }
