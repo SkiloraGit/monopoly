@@ -29,6 +29,7 @@ class MessageHandler {
       case 'respond_trade':     return this.onRespondTrade(msg, socketId, clients, wss);
       case 'resolve_duel':      return this.onResolveDuel(msg, socketId, clients, wss);
       case 'reconnect':         return this.onReconnect(msg, socketId, clients, wss);
+      case 'set_color':         return this.onSetColor(msg, socketId, clients, wss);
       default:
         this._send(clients.get(socketId)?.ws, { type: 'error', message: `Tipo desconocido: ${type}` });
     }
@@ -55,7 +56,7 @@ class MessageHandler {
   onCreateGame(msg, socketId, clients, wss) {
     const client = clients.get(socketId);
     if (!client) return;
-    const player = { id: client.playerId, name: client.playerName, socketId, ready: false };
+    const player = { id: client.playerId, name: client.playerName, socketId, ready: false, color: client.playerColor || null };
     const config = { mode: msg.mode||'elimination', turnLimit: msg.turnLimit||30, turnTime: msg.turnTime||30, botCount: msg.botCount||0 };
     const game   = this.gm.createGame(player, config);
     client.gameId = game.gameId;
@@ -81,7 +82,7 @@ class MessageHandler {
   onJoinGame(msg, socketId, clients, wss) {
     const client = clients.get(socketId);
     if (!client) return;
-    const player = { id: client.playerId, name: client.playerName, socketId, ready: false };
+    const player = { id: client.playerId, name: client.playerName, socketId, ready: false, color: client.playerColor || null };
     const result = this.gm.joinGame(msg.gameId, player);
     if (result.error) { this._send(client.ws, { type: 'error', message: result.error }); return; }
 
@@ -308,6 +309,27 @@ class MessageHandler {
       if (!client.gameId) this._send(client.ws, { type: 'lobby_update', games: list });
     }
   }
+
+  onSetColor(msg, socketId, clients, wss) {
+    const client = clients.get(socketId);
+    if (!client || !client.playerId) return;
+    const color = msg.color || '#ffffff';
+    // Store color on client for future games
+    client.playerColor = color;
+    // If player is in a game, update their color in the game state
+    if (client.gameId) {
+      const game = this.gm.getGame(client.gameId);
+      if (game) {
+        const player = game.getPlayer(client.playerId);
+        if (player) {
+          player.color = color;
+          // Broadcast updated game state
+          this._broadcastToGame(client.gameId, { type: 'player_color_changed', playerId: client.playerId, color, gameState: game.getPublicState() }, clients, wss);
+        }
+      }
+    }
+  }
+
 }
 
 module.exports = MessageHandler;

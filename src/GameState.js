@@ -41,7 +41,12 @@ class GameState {
   // ─── Jugadores ────────────────────────────────────────────────────────────
 
   addPlayer(player) {
-    player.color  = COLORS[this.players.length % COLORS.length];
+    // Use custom color if provided (from set_color message), else assign default
+    if (player.color) {
+      player._customColor = true;  // Mark as user-chosen
+    } else {
+      player.color = COLORS[this.players.length % COLORS.length];
+    }
     player.ready  = false;
     player.gold   = 0;
     player.position = 0;
@@ -98,7 +103,8 @@ class GameState {
       p.active = true;
       p.ready  = true;
       p.bonusRentTurns = 0;
-      p.color  = COLORS[i % COLORS.length];
+      // Preserve custom color if set, otherwise assign default
+      if (!p._customColor) p.color = COLORS[i % COLORS.length];
       if (p.isBot) p.disconnected = false;
     });
     this.currentPlayerIndex = 0;
