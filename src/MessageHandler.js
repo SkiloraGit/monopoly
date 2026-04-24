@@ -144,7 +144,7 @@ class MessageHandler {
     if (!client?.gameId) return;
     const result = this.gm.rollDice(client.gameId, client.playerId);
     if (result.error) { this._send(client.ws, { type: 'error', message: result.error }); return; }
-    this._broadcastToGame(client.gameId, { type: 'dice_rolled', ...result }, clients, wss);
+    this._broadcastToGame(client.gameId, { type: 'dice_rolled', playerId: client.playerId, ...result }, clients, wss);
   }
 
   onBuyProperty(socketId, clients, wss) {
@@ -271,10 +271,18 @@ class MessageHandler {
 
     try {
       const results = game.playBotTurn(botId);
+      let delay = 0;
       for (const result of results) {
         if (result && result.type) {
-          this._broadcastToGame(gameId, result, clients, wss);
-          // Pausa pequeña entre mensajes para que el cliente los procese
+          // Delay incremental: dice_rolled=300ms, otros=150ms entre sí
+          const d = result.type === 'dice_rolled' ? 300 : 150;
+          delay += d;
+          setTimeout(() => {
+            const g2 = this.gm.getGame(gameId);
+            if (g2 && g2.phase === 'playing') {
+              this._broadcastToGame(gameId, result, clients, wss);
+            }
+          }, delay);
         }
       }
     } catch (err) {
