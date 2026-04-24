@@ -274,13 +274,15 @@ class MessageHandler {
       let delay = 0;
       for (const result of results) {
         if (result && result.type) {
-          // Delay incremental: dice_rolled=300ms, otros=150ms entre sí
-          const d = result.type === 'dice_rolled' ? 300 : 150;
+          // Siempre incluir playerId del bot en cada mensaje
+          const enriched = { ...result, playerId: botId };
+          // Delay incremental: dice_rolled=400ms, otros=200ms entre sí
+          const d = result.type === 'dice_rolled' ? 400 : 200;
           delay += d;
           setTimeout(() => {
             const g2 = this.gm.getGame(gameId);
             if (g2 && g2.phase === 'playing') {
-              this._broadcastToGame(gameId, result, clients, wss);
+              this._broadcastToGame(gameId, enriched, clients, wss);
             }
           }, delay);
         }
