@@ -402,18 +402,51 @@ class GameState {
         return this._resolveCellAction(player, newPos);
       }
       case 'random_upgrade': {
-        const myProps = Object.entries(this.properties).filter(([,v]) => v.ownerId === playerId);
+        // Mejora una propiedad aleatoria propia que TENGA upgradeCosts
+        // y no esté en nivel máximo — sin requerir grupo completo
+        const myProps = Object.entries(this.properties)
+          .filter(([idxStr, v]) => {
+            if (v.ownerId !== playerId) return false;
+            const cd = BOARD_DATA.cells[parseInt(idxStr)];
+            return cd && cd.upgradeCosts && v.level < cd.upgradeCosts.length;
+          });
         if (myProps.length > 0) {
-          const [idx] = myProps[Math.floor(Math.random() * myProps.length)];
+          const [idx, prop] = myProps[Math.floor(Math.random() * myProps.length)];
           const cd = BOARD_DATA.cells[parseInt(idx)];
-          const prop = this.properties[idx];
-          if (cd.upgradeCosts && prop.level < cd.upgradeCosts.length) prop.level++;
+          const cost = cd.upgradeCosts[prop.level] || 0;
+          // El ítem cubre el 50% del costo (el jugador paga el resto si tiene oro)
+          const playerShare = Math.floor(cost * 0.5);
+          if (player.gold >= playerShare) {
+            player.gold -= playerShare;
+            prop.level++;
+            this._pushEvent('property_upgraded', {
+              playerId, cellIndex: parseInt(idx), newLevel: prop.level,
+              cost: playerShare, cellName: cd.name
+            });
+          } else {
+            // Sin oro suficiente: mejora gratis de todas formas (es un ítem especial)
+            prop.level++;
+            this._pushEvent('property_upgraded', {
+              playerId, cellIndex: parseInt(idx), newLevel: prop.level,
+              cost: 0, cellName: cd.name
+            });
+          }
         }
         break;
       }
       case 'revive':
-        player.active = true;
-        player.gold   = 200;
+        // Solo funciona si el jugador quebró (active=false)
+        // Si está activo, simplemente devuelve el ítem (sin efecto)
+        if (!player.active) {
+          player.active = true;
+          player.gold   = 200;
+          // Restaurar posición a inicio
+          player.position = 0;
+          player.jailTurns = 0;
+        } else {
+          // Jugador activo: dar bonus menor como compensación
+          player.gold += 100;
+        }
         break;
     }
 
@@ -434,6 +467,19 @@ class GameState {
         this._pushEvent('card', { type: 'lose_gold', amount: loss, playerId: player.id, playerName: player.name });
       } else if (r < 0.66) {
         player.jailTurns = 3;
+        // Mover al jugador a la casilla de mazmorra más cercana
+        const jailCells = BOARD_DATA.cells
+          .map((c, i) => ({ type: c.type, idx: i }))
+          .filter(c => c.type === 'mazmorra');
+        if (jailCells.length > 0) {
+          const nearest = jailCells.reduce((best, c) => {
+            const dist = (c.idx - player.position + CELL_COUNT) % CELL_COUNT;
+            const bestDist = (best.idx - player.position + CELL_COUNT) % CELL_COUNT;
+            return dist < bestDist ? c : best;
+          });
+          player.position = nearest.idx;
+        }
+        this._pushEvent('sent_to_jail', { playerId: player.id });
         this._pushEvent('card', { type: 'jail', playerId: player.id, playerName: player.name });
       } else {
         const myProps = Object.keys(this.properties).filter(i => this.properties[i].ownerId === player.id);
@@ -504,6 +550,19 @@ class GameState {
       this._pushEvent('mini_event', { type: 'one_lose', playerId: player.id, playerName: player.name });
     } else {
       player.jailTurns = 3;
+      // Mover al jugador a la casilla de mazmorra más cercana
+      const jailCells2 = BOARD_DATA.cells
+        .map((c, i) => ({ type: c.type, idx: i }))
+        .filter(c => c.type === 'mazmorra');
+      if (jailCells2.length > 0) {
+        const nearest2 = jailCells2.reduce((best, c) => {
+          const dist = (c.idx - player.position + CELL_COUNT) % CELL_COUNT;
+          const bestDist = (best.idx - player.position + CELL_COUNT) % CELL_COUNT;
+          return dist < bestDist ? c : best;
+        });
+        player.position = nearest2.idx;
+      }
+      this._pushEvent('sent_to_jail', { playerId: player.id });
       this._pushEvent('mini_event', { type: 'jail', playerId: player.id, playerName: player.name });
     }
     active.forEach(p => this._checkBankruptcy(p));
